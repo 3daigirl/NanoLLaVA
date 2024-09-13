@@ -18,7 +18,10 @@ device = 'cpu'
 print(f"Using device: {device}")
 
 # initialize dataset
-dataset = TextDataloader(TextDatasetConfig(text_file='data/input.txt'))
+dataset = TextDataloader(TextDatasetConfig(
+    text_file='data/input.txt',
+    batch_size=16,
+    block_size=1024))
 
 # create randomly initialized model
 model = GPT(GPTConfig())

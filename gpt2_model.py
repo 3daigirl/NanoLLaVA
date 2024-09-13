@@ -37,6 +37,20 @@ class GPT(nn.Module):
         print(self.lm_head.weight.size(), self.transformer.wte.weight.size())
         self.transformer.wte.weight = self.lm_head.weight
 
+        self.apply(self._init_weights)
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layers) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.2)
+
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Sequence legnth {T} cannot exceed block size {self.config.block_size}"
@@ -162,6 +176,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_proj(self.gelu(self.c_fc(x)))
@@ -173,6 +188,7 @@ class SelfAttention(nn.Module):
         assert config.n_embed % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embed, 3 * config.n_embed)
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embed = config.n_embed
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size).view(1, 1, config.block_size, config.block_size)))
