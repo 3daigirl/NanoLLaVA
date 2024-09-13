@@ -32,7 +32,12 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+        # share weights of lm_head and wte
+        # weights are shared between both as they perform similar tasks
+        print(self.lm_head.weight.size(), self.transformer.wte.weight.size())
+        self.transformer.wte.weight = self.lm_head.weight
+
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Sequence legnth {T} cannot exceed block size {self.config.block_size}"
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
@@ -43,8 +48,11 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        logits = self.lm_head(x)    # B, T, vocab_size
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, self.config.vocab_size), targets.view(-1))
+        return logits, loss
 
     def encode_tokens(self, input_string, num_repeat):
         enc = tiktoken.get_encoding('gpt2')
@@ -176,15 +184,27 @@ class SelfAttention(nn.Module):
         K = K.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B, nh, T, nd
         V = V.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B, nh, T, nd
         attn = (Q @ K.transpose(-2, -1)) / math.sqrt(K.size(-1))                    # B, nh, T, T
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))       # B, nh, T, T
+        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))        # B, nh, T, T
         attn = F.softmax(attn, dim=-1)                                              # B, nh, T, T
         x = (attn @ V)                                                              # B, nh, T, nd
         x = x.transpose(1, 2).contiguous().view(B, T, C)                            # B, T, C
         x = self.c_proj(x)
         return x
 
-# create a GPT model and load pretrained weights
-model = GPT.from_pretrained('gpt2')
-generated_strings = model.generate("Hello, I'm a language model,", 50, 5)
-for string in generated_strings:
-    print(string)
+
+def main():
+    # auto-detect device
+    device = 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = 'mps'
+    print(f"Using device: {device}")
+
+    # create a GPT model and load pretrained weights
+    model = GPT.from_pretrained('gpt2').to(device)
+    
+    # perform inference on the pretrained model
+    generated_strings = model.generate("Hello, I'm a language model,", 50, 5)
+    for string in generated_strings:
+        print(string)
