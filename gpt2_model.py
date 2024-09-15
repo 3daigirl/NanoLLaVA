@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 import math
+import inspect
 
 from transformers import GPT2LMHeadModel
 import tiktoken
@@ -34,7 +35,6 @@ class GPT(nn.Module):
 
         # share weights of lm_head and wte
         # weights are shared between both as they perform similar tasks
-        print(self.lm_head.weight.size(), self.transformer.wte.weight.size())
         self.transformer.wte.weight = self.lm_head.weight
 
         self.apply(self._init_weights)
@@ -110,6 +110,27 @@ class GPT(nn.Module):
         x = self.decode_tokens(x)
         return x
 
+    def configure_optimizer(self, weight_decay, learning_rate, betas, device):
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        # Only apply decay to weight and embedding parameters
+        # Don't apply decay to bias and layernorm params
+        decay_params = [p for _, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for _, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        np_decay = sum(p.numel() for p in decay_params)
+        np_nodecay = sum(p.numel() for p in nodecay_params)
+        print(f"Num decay tensors: {len(decay_params)}, num decayed params: {np_decay}")
+        print(f"Num nodecay tensors: {len(nodecay_params)}, num decayed params: {np_nodecay}")
+        
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device=='cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        return optimizer
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads the pretrained weights from OpenAI GPT-2 model on Huggingface"""
@@ -145,7 +166,6 @@ class GPT(nn.Module):
         for k in pretrained_keys:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
-                # breakpoint()
                 assert pretrained_sd[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(pretrained_sd[k].t())
@@ -199,10 +219,15 @@ class SelfAttention(nn.Module):
         Q = Q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B, nh, T, nd
         K = K.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B, nh, T, nd
         V = V.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B, nh, T, nd
-        attn = (Q @ K.transpose(-2, -1)) / math.sqrt(K.size(-1))                    # B, nh, T, T
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))        # B, nh, T, T
-        attn = F.softmax(attn, dim=-1)                                              # B, nh, T, T
-        x = (attn @ V)                                                              # B, nh, T, nd
+        
+        # attn = (Q @ K.transpose(-2, -1)) / math.sqrt(K.size(-1))                    # B, nh, T, T
+        # attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))        # B, nh, T, T
+        # attn = F.softmax(attn, dim=-1)                                              # B, nh, T, T
+        # x = (attn @ V)                                                              # B, nh, T, nd
+        # Flash Attention, more flops but faster due to less data transfer over GPU memory
+        # Leads to ~27% faster performance
+        x = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+
         x = x.transpose(1, 2).contiguous().view(B, T, C)                            # B, T, C
         x = self.c_proj(x)
         return x
