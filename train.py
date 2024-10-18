@@ -39,13 +39,15 @@ else:
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = 'mps'
     #TODO: uncomment when running on GPU
-    device = 'cpu'
+    # device = 'cpu'
 
 print(f"Using device: {device}")
 
 total_batch_size = 524288     # Total batch size across all gpus, 0.5 million
-B = 16                  # process B batch-size per gpu
+B = 32                  # process B batch-size per gpu
 T = 1024                # sequence length
+num_steps = 19073      # Total number of tokens in dataset / Total Batch Size
+                        # 10B / 2**19, same as max_steps
 assert total_batch_size % (B * T * ngpus) == 0
 num_grad_accum = total_batch_size // (B * T * ngpus)
 if master_process:
@@ -63,7 +65,9 @@ if torch.cuda.is_available():
 #     block_size=T
 # ), ddp_rank=ddp_rank, total_gpus=ngpus)
 # data_ptr = iter(dataset)
-dataset = DataloaderLite(B, T, 'data/input.txt', ddp_rank, ngpus)
+# dataset = DataloaderLite('data/input.txt', B, T, ddp_rank, ngpus, )
+train_dataset = DataloaderLite(B, T, ddp_rank, ngpus, 'train')
+val_dataset = DataloaderLite(B, T, ddp_rank, ngpus, 'val')
 
 # create randomly initialized model
 model = GPT(GPTConfig(
@@ -76,21 +80,45 @@ model = model.to(device)
 model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+    
+raw_model = model.module if ddp else model  # to run the function model.configure_optimizer
 
 # train model
 # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95), eps=1e-8)
-optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=6e-4, betas=(0.9, 0.95), device=device)
+optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-4, betas=(0.9, 0.95), device=device)
 
-for i in range(50):
+for i in range(num_steps):
+    last_step = i == num_steps - 1
+    if step % 250 == 0 or last_step:
+        model.eval()
+        # does it make sense to reset??
+        # we'll only repeat eval for first 20 * ngpus batches
+        # we will never eval over the full val set
+        val_dataset.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_dataset.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                val_loss_accum += loss.detach() / val_loss_steps
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print("Validation loss: {:.4f}".format(val_loss_accum.item()))
+
+    model.train()
     optimizer.zero_grad()
     t0 = time.time()
     batch_loss = 0.0
     for step in range(num_grad_accum):
-        x, y = dataset.next_batch()
+        x, y = train_dataset.next_batch()
         x, y = x.to(device), y.to(device)
         #TODO: uncomment while running on GPU
-        # with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
         # Average is taken over gradients of all training examples in the batch. 
         # Hence divide loss by num_grad_accum to ensure mean of all training examples is taken
         loss = loss / num_grad_accum

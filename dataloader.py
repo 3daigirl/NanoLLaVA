@@ -1,3 +1,6 @@
+import numpy as np
+import os
+
 from dataclasses import dataclass
 import tiktoken
 
@@ -39,25 +42,40 @@ class TextDataloader(Dataset):
         targets = batch[1:].view(B, T)
         return inputs, targets
 
+def load_tokens(filename):
+    tokens = np.load(filename)
+    enc = tiktoken.get_encoding('gpt2')
+    tokens = torch.tensor(enc.encode(tokens), dtype=torch.long)
+    return tokens
 
 class DataloaderLite:
-    def __init__(self, text_file, B, T, ddp_rank, total_gpus):
-        with open(text_file, 'r') as f:
-            text = f.read()
+    def __init__(self, B, T, ddp_rank, total_gpus, split='train'):
+        
+        ## Use this to load shakespeare data from .txt file
+        # with open(text_file, 'r') as f:
+            # text = f.read()
 
         self.B = B
         self.T = T
         self.ddp_rank = ddp_rank
         self.total_gpus = total_gpus
 
-        enc = tiktoken.get_encoding('gpt2')
-        self.tokens = torch.tensor(enc.encode(text))
-        print(f"Loaded {len(self.tokens)}")
-        print(f"Number of batches = {len(self.tokens)/(self.B * self.T)}")
+        # Load numpy data for FineWeb-Edu
+        # txt = np.load(filename)
 
-        # track data pointer in this dataloader
+        root_dir = "edu_fineweb10B"
+        shards = [s for s in os.listdir(root_dir) if split in s]
+        self.shards = sorted(shards)
+        assert len(self.shards) > 0, f"{split} doesn't have any shards"
+
+        self.reset()
+
+    def reset(self):
+        # track the shard pointer
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        # track data pointer in this shard
         self.current_position = self.ddp_rank * self.B * self.T
-
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -65,6 +83,9 @@ class DataloaderLite:
         inputs = batch[:-1].view(B, T)
         targets = batch[1:].view(B, T)
         self.current_position += B * T * self.total_gpus
+        # if current position exceeds this shard, proceed to next shard
         if self.current_position + (B * T * self.total_gpus + 1) > len(self.tokens):
-            self.current_position = B * T * self.total_gpus
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.ddp_rank
         return inputs, targets
