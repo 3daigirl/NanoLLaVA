@@ -42,10 +42,18 @@ class TextDataloader(Dataset):
         targets = batch[1:].view(B, T)
         return inputs, targets
 
-def load_tokens(filename):
+def load_tokens_from_tokenizer(filename):
     tokens = np.load(filename)
+    if isinstance(tokens, bytes):
+        tokens = tokens.decode('utf-8')
+
     enc = tiktoken.get_encoding('gpt2')
     tokens = torch.tensor(enc.encode(tokens), dtype=torch.long)
+    return tokens
+
+def load_tokens(filename):
+    tokens = np.load(filename).astype(np.int64)
+    tokens = torch.tensor(tokens, dtype=torch.long)
     return tokens
 
 class DataloaderLite:
@@ -64,7 +72,7 @@ class DataloaderLite:
         # txt = np.load(filename)
 
         root_dir = "edu_fineweb10B"
-        shards = [s for s in os.listdir(root_dir) if split in s]
+        shards = [os.path.join(root_dir, s) for s in os.listdir(root_dir) if split in s]
         self.shards = sorted(shards)
         assert len(self.shards) > 0, f"{split} doesn't have any shards"
 

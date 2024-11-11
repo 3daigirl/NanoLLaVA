@@ -118,11 +118,11 @@ def get_most_likely_row(tokens, mask, logits):
     pred_norm = avg_loss.argmin().item()
     return pred_norm
 
-for i in range(num_steps):
-    last_step = i == num_steps - 1
+for step in range(num_steps):
+    last_step = step == num_steps - 1
     if step % 250 == 0 or last_step:
         model.eval()
-        # does it make sense to reset??
+        # TODO: does it make sense to reset??
         # we'll only repeat eval for first 20 * ngpus batches
         # we will never eval over the full val set
         val_dataset.reset()
@@ -231,7 +231,7 @@ for i in range(num_steps):
     optimizer.zero_grad()
     t0 = time.time()
     batch_loss = 0.0
-    for step in range(num_grad_accum):
+    for train_step in range(num_grad_accum):
         x, y = train_dataset.next_batch()
         x, y = x.to(device), y.to(device)
         #TODO: uncomment while running on GPU
@@ -242,7 +242,7 @@ for i in range(num_steps):
         loss = loss / num_grad_accum
         batch_loss += loss.detach()
         if ddp:
-            model.requires_backward_grad_sync = (step == num_grad_accum - 1)
+            model.requires_backward_grad_sync = (train_step == num_grad_accum - 1)
         loss.backward()
         if ddp:
             dist.all_reduce(batch_loss, op=dist.ReduceOp.AVG)

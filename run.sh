@@ -3,6 +3,8 @@
 # Exit if any command fails
 set -e
 
+source "$HOME/miniconda/etc/profile.d/conda.sh"
+conda init bash
 conda activate pytorch_ddp
 
 python fineweb.py
